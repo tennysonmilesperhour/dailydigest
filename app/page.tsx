@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { storage } from "../lib/storage";
+import { login as accountLogin, logout as accountLogout, getSession, PASSWORD_REQUIRED } from "../lib/accounts";
 
 /* ==============================================================
    THE DAILY DUMP · All the News That's Fit to Flush
@@ -30,6 +31,7 @@ const TYPE_META = {
 
 /* ---------- Illustrated plates, Bristol types 1-7 ---------- */
 function Specimen({ type, size = 88 }) {
+  if (!TYPE_META[type]) type = 4; // guard against stored/invalid types
   const t = TYPE_META[type].tone;
   const face = (x, y, mood) => (
     <g>
@@ -121,7 +123,7 @@ function compressImage(file) {
         resolve(cv.toDataURL("image/jpeg", 0.62));
       };
       img.onerror = reject;
-      img.src = e.target.result;
+      img.src = e.target.result as string;
     };
     reader.onerror = reject;
     reader.readAsDataURL(file);
@@ -166,7 +168,7 @@ function Stamp({ children, color = RED, rotate = -4, style }) {
   );
 }
 
-function Btn({ children, onClick, disabled, primary, small, style }) {
+function Btn({ children, onClick, disabled, primary, small, style }: any) {
   return (
     <button onClick={onClick} disabled={disabled} style={{
       fontFamily: "'Oswald', sans-serif", fontWeight: 500, letterSpacing: "0.14em", textTransform: "uppercase",
@@ -187,7 +189,7 @@ const inputStyle = {
 export default function App() {
   const [tab, setTab] = useState("feed");
   const [me, setMe] = useState("");
-  const [nameInput, setNameInput] = useState("");
+  const [authError, setAuthError] = useState("");
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [protoFilter, setProtoFilter] = useState(null);
@@ -196,17 +198,39 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      try { const r = await storage.get(ME_KEY, false); if (r) setMe(r.value); } catch {}
+      // Restore the signed-in byline. Migrate anyone who used the old per-device
+      // byline (ME_KEY) into a real account so they don't get logged out by the update.
+      let who = await getSession();
+      if (!who) {
+        try {
+          const legacy = await storage.get(ME_KEY, false);
+          if (legacy?.value) {
+            const res = await accountLogin(legacy.value);
+            if (res.ok && res.username) who = res.username;
+          }
+        } catch {}
+      }
+      if (who) setMe(who);
       setPosts(await loadFeed());
       setLoading(false);
     })();
   }, []);
 
-  const saveName = async () => {
-    const n = nameInput.trim().slice(0, 24);
-    if (!n) return;
-    setMe(n);
-    try { await storage.set(ME_KEY, n, false); } catch { setStorageDown(true); }
+  const login = async (username) => {
+    const res = await accountLogin(username);
+    if (res.ok && res.username) {
+      setMe(res.username);
+      setAuthError("");
+    } else {
+      setAuthError(res.error || "Could not sign in.");
+    }
+    return res;
+  };
+
+  const logout = async () => {
+    await accountLogout();
+    setMe("");
+    setAuthError("");
   };
 
   const refresh = async () => setPosts(await loadFeed());
@@ -228,15 +252,6 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", background: PAPER, backgroundImage: `${GRAIN}, radial-gradient(ellipse at 50% 0%, rgba(255,255,255,0.5), transparent 60%)`, color: INK }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=UnifrakturMaguntia&family=Old+Standard+TT:ital,wght@0,400;0,700;1,400&family=Oswald:wght@400;500;600&family=Courier+Prime:ital@0;1&display=swap');
-        * { box-sizing: border-box; }
-        body { margin: 0; }
-        button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid ${RED}; outline-offset: 2px; }
-        ::selection { background: ${RED}; color: ${PAPER}; }
-        @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
-      `}</style>
-
       <div style={{ maxWidth: 680, margin: "0 auto", padding: "18px 18px 0", fontFamily: "'Old Standard TT', serif" }}>
 
         {/* Ear line */}
@@ -256,6 +271,15 @@ export default function App() {
         <div style={{ borderTop: rule(1), borderBottom: rule(1), padding: "5px 0", textAlign: "center", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: "0.1em" }}>
           {todayLine()} · GUT CONDITIONS: VARIABLE
         </div>
+
+        {me && (
+          <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, padding: "6px 0 0", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: "0.06em", color: SEPIA }}>
+            <span>FILED UNDER THE BYLINE: <span style={{ fontWeight: 700, color: INK }}>{me.toUpperCase()}</span></span>
+            <button onClick={logout} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: "0.06em", color: RED, textDecoration: "underline", textUnderlineOffset: 3, padding: 0 }}>
+              SIGN OUT
+            </button>
+          </div>
+        )}
 
         {storageDown && (
           <div style={{ border: `2px solid ${RED}`, margin: "10px 0 0", padding: "10px 14px", textAlign: "center" }}>
@@ -281,7 +305,7 @@ export default function App() {
 
         <main style={{ paddingBottom: 40 }}>
           {tab === "feed" && (
-            <Feed me={me} nameInput={nameInput} setNameInput={setNameInput} saveName={saveName}
+            <Feed me={me} login={login} authError={authError}
               posts={posts} loading={loading} addPost={addPost} mutatePost={mutatePost} refresh={refresh} jump={jumpToProtocol}
               onGoldenSnake={() => setShowGame(true)} />
           )}
@@ -293,7 +317,7 @@ export default function App() {
         <footer style={{ borderTop: rule(3), padding: "16px 0 44px", textAlign: "center" }}>          <p style={{ fontFamily: "'Courier Prime', monospace", fontSize: 10.5, lineHeight: 1.7, color: SEPIA, maxWidth: 520, margin: "0 auto" }}>
             THE DAILY DUMP is published for laughs and loose wellness direction among friends and constitutes no medical advice whatsoever.
             Blood, black tarry stool, persistent changes, unexplained weight loss, or pain: consult an actual physician.
-            All submissions are visible to every reader of this publication. Govern yourselves accordingly.
+            Public submissions run for every reader of this publication; private ones stay on your own desk. Govern yourselves accordingly.
           </p>
         </footer>
       </div>
@@ -304,26 +328,50 @@ export default function App() {
 }
 
 /* ============================ FEED ============================ */
-function Feed({ me, nameInput, setNameInput, saveName, posts, loading, addPost, mutatePost, refresh, jump, onGoldenSnake }) {
+function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refresh, jump, onGoldenSnake }) {
   const [imgData, setImgData] = useState(null);
   const [type, setType] = useState(4);
   const [note, setNote] = useState("");
   const [posting, setPosting] = useState(false);
   const [commentDrafts, setCommentDrafts] = useState({});
+  const [loginInput, setLoginInput] = useState("");
+  const [signingIn, setSigningIn] = useState(false);
+  const [mediaMode, setMediaMode] = useState("photo"); // "photo" | "plate"
+  const [visibility, setVisibility] = useState("public"); // "public" | "private"
   const fileRef = useRef(null);
 
+  const doLogin = async () => {
+    if (signingIn) return;
+    setSigningIn(true);
+    await login(loginInput);
+    setSigningIn(false);
+  };
+
   if (!me) {
+    // Rendered as <section> (not <div>) on purpose: it keeps React from reusing
+    // the byline <input> node as the composer's file <input> when you sign in,
+    // which otherwise trips a controlled→uncontrolled warning.
     return (
-      <div style={{ border: rule(1), outline: `1px solid ${INK}`, outlineOffset: 3, padding: "28px 24px", margin: "34px auto", maxWidth: 480, textAlign: "center" }}>
-        <p style={{ fontFamily: "'Oswald', sans-serif", fontSize: 12, letterSpacing: "0.3em", textTransform: "uppercase", margin: "0 0 8px", color: RED }}>Public Notice</p>
-        <h2 style={{ fontFamily: "'Old Standard TT', serif", fontSize: 26, margin: "0 0 8px" }}>Correspondents Wanted</h2>
+      <section style={{ border: rule(1), outline: `1px solid ${INK}`, outlineOffset: 3, padding: "28px 24px", margin: "34px auto", maxWidth: 480, textAlign: "center" }}>
+        <p style={{ fontFamily: "'Oswald', sans-serif", fontSize: 12, letterSpacing: "0.3em", textTransform: "uppercase", margin: "0 0 8px", color: RED }}>Press Credentials</p>
+        <h2 style={{ fontFamily: "'Old Standard TT', serif", fontSize: 26, margin: "0 0 8px" }}>Sign In to File Reports</h2>
         <p style={{ fontSize: 14.5, lineHeight: 1.6, margin: "0 0 18px", fontStyle: "italic" }}>
-          Every report needs a byline. Choose yours. Note that all submissions run in full public view of every reader.
+          One byline is all it takes. Type yours to claim it — no password required. Sign in again with the same byline on any device to reclaim your desk and your filed dispatches.
         </p>
-        <input value={nameInput} onChange={(e) => setNameInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveName()}
-          placeholder="The LogFather, Scoop Dogg, Editor-in-Relief..." style={{ ...inputStyle, textAlign: "center", marginBottom: 12 }} />
-        <Btn primary onClick={saveName}>Join the Press Corps</Btn>
-      </div>
+        <input value={loginInput} onChange={(e) => setLoginInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doLogin()}
+          placeholder="The LogFather, Scoop Dogg, Editor-in-Relief..." aria-label="Byline" style={{ ...inputStyle, textAlign: "center", marginBottom: 10 }} />
+        <input type="password" disabled value="" placeholder={PASSWORD_REQUIRED ? "Password" : "Password — disabled for now"}
+          aria-label="Password (disabled)" style={{ ...inputStyle, textAlign: "center", marginBottom: 6, opacity: 0.5, cursor: "not-allowed" }} />
+        <p style={{ fontFamily: "'Courier Prime', monospace", fontSize: 10, letterSpacing: "0.04em", color: SEPIA, margin: "0 0 16px" }}>
+          Passwords are switched off for now. Trusted friends only.
+        </p>
+        {authError && (
+          <p style={{ fontFamily: "'Courier Prime', monospace", fontSize: 11.5, color: RED, margin: "0 0 12px" }}>{authError}</p>
+        )}
+        <Btn primary onClick={doLogin} disabled={signingIn || !loginInput.trim()}>
+          {signingIn ? "Checking the roster..." : "Sign In / Join the Press Corps"}
+        </Btn>
+      </section>
     );
   }
 
@@ -333,19 +381,35 @@ function Feed({ me, nameInput, setNameInput, saveName, posts, loading, addPost, 
     try { setImgData(await compressImage(f)); } catch { alert("That photograph could not be developed. Try another."); }
   };
 
+  const usePlaceholder = mediaMode === "plate";
+
   const submit = async () => {
-    if (!imgData) return;
+    if (!usePlaceholder && !imgData) return; // a photograph is required unless using the plate
     setPosting(true);
     const postedType = type;
     await addPost({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      author: me, ts: Date.now(), img: imgData, type, note: note.trim().slice(0, 240),
+      author: me, ts: Date.now(),
+      img: usePlaceholder ? null : imgData,
+      usePlaceholder,
+      type, note: note.trim().slice(0, 240),
+      visibility,
       reactions: {}, comments: [],
     });
     setImgData(null); setNote(""); setType(4); setPosting(false);
+    setMediaMode("photo"); setVisibility("public");
     if (fileRef.current) fileRef.current.value = "";
     if (postedType === 4) onGoldenSnake();
   };
+
+  const toggleVisibility = (post) => mutatePost(post.id, (p) => {
+    p.visibility = (p.visibility || "public") === "public" ? "private" : "public";
+    return p;
+  });
+
+  const isMine = (p) => (p.author || "").toLowerCase() === (me || "").toLowerCase();
+  // Private posts are shown only to their author. (This is UI-level privacy — see lib/accounts.ts.)
+  const visiblePosts = posts.filter((p) => (p.visibility || "public") === "public" || isMine(p));
 
   const react = (post, emoji) => mutatePost(post.id, (p) => {
     const r = { ...(p.reactions || {}) };
@@ -379,19 +443,41 @@ function Feed({ me, nameInput, setNameInput, saveName, posts, loading, addPost, 
           Submit a Story · Byline: {me}
         </p>
 
-        {!imgData ? (
-          <button onClick={() => fileRef.current?.click()} style={{
-            width: "100%", padding: "30px 14px", background: "rgba(255,255,255,0.35)",
-            border: `1px dashed ${INK}`, cursor: "pointer", fontFamily: "'Old Standard TT', serif",
-            fontStyle: "italic", fontSize: 15, color: INK,
-          }}>
-            Attach photographic evidence †
-          </button>
+        {/* Choose how the story is illustrated: a real photograph, or the house plate. */}
+        <div style={{ display: "flex", border: rule(1), marginBottom: 12 }}>
+          {[["photo", "Photograph"], ["plate", "Use the Illustrated Plate"]].map(([mode, label], i) => (
+            <button key={mode} onClick={() => setMediaMode(mode)} style={{
+              flex: 1, padding: "9px 10px", cursor: "pointer", background: mediaMode === mode ? INK : "transparent",
+              color: mediaMode === mode ? PAPER : INK, border: "none", borderLeft: i > 0 ? rule(1) : "none",
+              fontFamily: "'Oswald', sans-serif", fontWeight: 500, fontSize: 11, letterSpacing: "0.14em", textTransform: "uppercase",
+            }}>{label}</button>
+          ))}
+        </div>
+
+        {mediaMode === "photo" ? (
+          !imgData ? (
+            <button onClick={() => fileRef.current?.click()} style={{
+              width: "100%", padding: "30px 14px", background: "rgba(255,255,255,0.35)",
+              border: `1px dashed ${INK}`, cursor: "pointer", fontFamily: "'Old Standard TT', serif",
+              fontStyle: "italic", fontSize: 15, color: INK,
+            }}>
+              Attach photographic evidence †
+            </button>
+          ) : (
+            <div style={{ position: "relative", marginBottom: 4 }}>
+              <img src={imgData} alt="Evidence, awaiting publication" style={{ width: "100%", display: "block", border: rule(1), filter: "sepia(0.15) contrast(1.02)" }} />
+              <button onClick={() => { setImgData(null); if (fileRef.current) fileRef.current.value = ""; }}
+                style={{ position: "absolute", top: 8, right: 8, background: PAPER, border: rule(1), padding: "3px 9px", cursor: "pointer", fontFamily: "'Courier Prime', monospace", fontSize: 12 }}>KILL</button>
+            </div>
+          )
         ) : (
-          <div style={{ position: "relative", marginBottom: 4 }}>
-            <img src={imgData} alt="Evidence, awaiting publication" style={{ width: "100%", display: "block", border: rule(1), filter: "sepia(0.15) contrast(1.02)" }} />
-            <button onClick={() => { setImgData(null); if (fileRef.current) fileRef.current.value = ""; }}
-              style={{ position: "absolute", top: 8, right: 8, background: PAPER, border: rule(1), padding: "3px 9px", cursor: "pointer", fontFamily: "'Courier Prime', monospace", fontSize: 12 }}>KILL</button>
+          <div style={{ border: `1px dashed ${INK}`, background: "rgba(255,255,255,0.35)", padding: "18px 14px", textAlign: "center" }}>
+            <div style={{ display: "inline-block", border: rule(1), padding: 8, background: "rgba(255,255,255,0.4)" }}>
+              <Specimen type={type} size={120} />
+            </div>
+            <p style={{ fontFamily: "'Courier Prime', monospace", fontSize: 10.5, color: SEPIA, letterSpacing: "0.06em", margin: "10px 0 0" }}>
+              THE HOUSE PLATE FOR TYPE {type} · NO PHOTOGRAPH NEEDED
+            </p>
           </div>
         )}
         <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
@@ -405,8 +491,26 @@ function Feed({ me, nameInput, setNameInput, saveName, posts, loading, addPost, 
         <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2}
           placeholder="Statement to the press: what was consumed, how the correspondent feels, any regrets..."
           style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }} />
+
+        {/* Who gets to read it. Private stays on your desk; public runs for everyone. */}
+        <div style={{ display: "flex", gap: 10, margin: "0 0 14px", alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ fontFamily: "'Oswald', sans-serif", fontSize: 11, letterSpacing: "0.2em", textTransform: "uppercase" }}>Circulation</label>
+          <div style={{ display: "flex", border: rule(1), flex: 1, minWidth: 200 }}>
+            {[["public", "Public"], ["private", "Private"]].map(([v, label], i) => (
+              <button key={v} onClick={() => setVisibility(v)} style={{
+                flex: 1, padding: "8px 10px", cursor: "pointer", background: visibility === v ? INK : "transparent",
+                color: visibility === v ? PAPER : INK, border: "none", borderLeft: i > 0 ? rule(1) : "none",
+                fontFamily: "'Oswald', sans-serif", fontWeight: 500, fontSize: 11, letterSpacing: "0.14em", textTransform: "uppercase",
+              }}>{label}</button>
+            ))}
+          </div>
+        </div>
+        <p style={{ fontFamily: "'Courier Prime', monospace", fontSize: 10, color: SEPIA, letterSpacing: "0.04em", margin: "-8px 0 14px", textAlign: "center" }}>
+          {visibility === "private" ? "Private: only you will see this in the feed. You can make it public later." : "Public: every reader of the paper can see this."}
+        </p>
+
         <div style={{ textAlign: "center" }}>
-          <Btn primary onClick={submit} disabled={!imgData || posting} style={{ minWidth: 220 }}>
+          <Btn primary onClick={submit} disabled={(mediaMode === "photo" && !imgData) || posting} style={{ minWidth: 220 }}>
             {posting ? "Going to press..." : "Run It on the Front Page"}
           </Btn>
         </div>
@@ -422,16 +526,17 @@ function Feed({ me, nameInput, setNameInput, saveName, posts, loading, addPost, 
       </div>
 
       {loading && <p style={{ textAlign: "center", fontStyle: "italic" }}>The presses are warming up...</p>}
-      {!loading && posts.length === 0 && (
+      {!loading && visiblePosts.length === 0 && (
         <div style={{ textAlign: "center", padding: "30px 0 10px" }}>
           <p style={{ fontFamily: "'Old Standard TT', serif", fontSize: 22, margin: 0 }}>Nothing to Report.</p>
           <p style={{ fontStyle: "italic", fontSize: 14, color: SEPIA, margin: "6px 0 0" }}>A slow news day at the bowl. Someone must go first.</p>
         </div>
       )}
 
-      {posts.map((p, idx) => {
+      {visiblePosts.map((p, idx) => {
         const meta = TYPE_META[p.type] || TYPE_META[4];
         const counts = reactionCounts(p);
+        const priv = (p.visibility || "public") === "private";
         return (
           <article key={p.id} style={{ borderTop: idx === 0 ? "none" : rule(1), padding: "24px 0 26px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
@@ -440,20 +545,34 @@ function Feed({ me, nameInput, setNameInput, saveName, posts, loading, addPost, 
                   Type {p.type} Reported: {meta.label}
                 </h3>
                 <p style={{ margin: 0, fontFamily: "'Courier Prime', monospace", fontSize: 11.5, letterSpacing: "0.06em" }}>
-                  By <span style={{ fontWeight: 700 }}>{p.author.toUpperCase()}</span>, Staff Correspondent · {timeAgo(p.ts)}
+                  By <span style={{ fontWeight: 700 }}>{(p.author || "Anonymous").toUpperCase()}</span>, Staff Correspondent · {timeAgo(p.ts)}
                 </p>
+                {priv && (
+                  <p style={{ margin: "4px 0 0", fontFamily: "'Oswald', sans-serif", fontSize: 10, letterSpacing: "0.24em", textTransform: "uppercase", color: RED }}>
+                    ● Private · Not Circulated
+                  </p>
+                )}
               </div>
               <Stamp rotate={p.type === 4 ? -6 : 4} color={p.type === 7 ? RED : p.type === 4 ? "#3E6B45" : RED} style={{ flexShrink: 0, marginTop: 4 }}>
                 {meta.status}
               </Stamp>
             </div>
 
-            {p.img && (
+            {p.img ? (
               <figure style={{ margin: "14px 0 4px" }}>
                 <img src={p.img} alt={`Type ${p.type} evidence filed by ${p.author}`}
                   style={{ width: "100%", display: "block", border: rule(1), filter: "sepia(0.18) contrast(1.03)" }} />
                 <figcaption style={{ fontFamily: "'Courier Prime', monospace", fontSize: 10.5, color: SEPIA, marginTop: 5, letterSpacing: "0.04em" }}>
                   PHOTOGRAPHIC EVIDENCE · SUBMITTED BY THE CORRESPONDENT · UNRETOUCHED
+                </figcaption>
+              </figure>
+            ) : (
+              <figure style={{ margin: "14px 0 4px" }}>
+                <div style={{ border: rule(1), background: "rgba(255,255,255,0.3)", padding: "22px 0", display: "flex", justifyContent: "center" }}>
+                  <Specimen type={TYPE_META[p.type] ? p.type : 4} size={150} />
+                </div>
+                <figcaption style={{ fontFamily: "'Courier Prime', monospace", fontSize: 10.5, color: SEPIA, marginTop: 5, letterSpacing: "0.04em" }}>
+                  ILLUSTRATED PLATE · NO PHOTOGRAPH ON FILE · RENDERED BY OUR STAFF ARTIST
                 </figcaption>
               </figure>
             )}
@@ -473,6 +592,15 @@ function Feed({ me, nameInput, setNameInput, saveName, posts, loading, addPost, 
             }}>
               See Classified Remedy for Type {p.type} →
             </button>
+
+            {isMine(p) && (
+              <button onClick={() => toggleVisibility(p)} style={{
+                background: "none", border: rule(1), cursor: "pointer", padding: "5px 12px", margin: "0 0 12px", display: "inline-block",
+                fontFamily: "'Oswald', sans-serif", fontSize: 10.5, letterSpacing: "0.16em", textTransform: "uppercase", color: INK,
+              }}>
+                {priv ? "↑ Make Public" : "↓ Make Private"}
+              </button>
+            )}
 
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {REACTIONS.map((e) => (
