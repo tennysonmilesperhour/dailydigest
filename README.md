@@ -8,7 +8,10 @@ This is the Next.js version, built to run on your own domain via Vercel so you c
 
 - Runs as a real Next.js app instead of a Claude artifact.
 - The shared feed is now backed by Supabase (a single `kv_store` table) instead of artifact storage.
-- Personal values (your byline, your snake high score) live in the browser's localStorage, so they stay per-device.
+- You sign in with just a byline (username) — no password yet. Accounts live in Supabase, so the same byline works on any device and your filed posts follow you across sessions.
+- Each post can be **public** (every reader sees it) or **private** (only you see it in the feed), toggleable at any time.
+- You can illustrate a post with the house **illustrated plate** for its Bristol type instead of uploading a photo.
+- Your snake high score lives in the browser's localStorage, so it stays per-device.
 - The text-message link preview is controlled by the metadata in `app/layout.tsx`, currently set to show only "The Daily Dump".
 
 ## Setup
@@ -55,7 +58,9 @@ The link preview will read "The Daily Dump" and nothing else. To change it, edit
 
 ## Notes on privacy
 
-The app has no login. Anyone with the URL can read and post, and anyone with your Supabase anon key could write to the table. For a small trusted friend group this is fine. If it grows, add Supabase Auth (email magic links or an invite code gate) and tighten the RLS policies in `supabase.sql` to authenticated users only.
+Sign-in is byline-only: there is no password yet, so anyone who types a byline becomes that "account." Accounts, posts, and their public/private flags all live in the shared Supabase `kv_store`, which the anon key can read. That means **"private" is UI-level, not cryptographic**: private posts are hidden from the rendered feed for everyone but their author, but a determined person with your anon key could still read the raw row. For a small trusted friend group that's the intended trade-off.
+
+When you want real privacy: flip `PASSWORD_REQUIRED` in `lib/accounts.ts`, wire up Supabase Auth (email magic links or an invite-code gate), and tighten the RLS policies in `supabase.sql` to authenticated users only.
 
 ## Files worth knowing
 

@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=UnifrakturMaguntia&family=Old+Standard+TT:ital,wght@0,400;0,700;1,400&family=Oswald:wght@400;500;600&family=Courier+Prime:ital@0;1&display=swap');
+
 * {
   box-sizing: border-box;
 }
@@ -8,4 +10,24 @@ body {
   padding: 0;
   background: #f3ecdc;
   -webkit-font-smoothing: antialiased;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid #a63325;
+  outline-offset: 2px;
+}
+
+::selection {
+  background: #a63325;
+  color: #f3ecdc;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
 }
