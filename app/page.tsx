@@ -1,8 +1,10 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { storage } from "../lib/storage";
-import { login as accountLogin, logout as accountLogout, getSession, PASSWORD_REQUIRED } from "../lib/accounts";
+import {
+  getUserId, onAuthChange, sendMagicLink, signOut, getMyProfile, setMyByline, isSupabaseConfigured,
+} from "../lib/auth";
+import { fetchFeed, createPost, setPostVisibility, toggleReaction, addComment } from "../lib/db";
 
 /* ==============================================================
    THE DAILY DUMP · All the News That's Fit to Flush
@@ -94,21 +96,8 @@ const PROTOCOLS = [
     steps: ["Weekly rotation: kefir, kimchi, sauerkraut, miso, yogurt, kombucha, tempeh", "Newcomers start at 1 to 2 tbsp and ramp to full servings", "Paired with prebiotic fiber: garlic, onion, leeks, asparagus, oats", "Stool type logged daily. Expect gas in week one, improvement in week two."] },
 ];
 
-/* ---------- Storage ---------- */
-const FEED_KEY = "sp-feed-v1";
-const ME_KEY = "sp-me-v1";
-const MAX_POSTS = 30;
-
-async function loadFeed() {
-  try { const r = await storage.get(FEED_KEY, true); return r ? JSON.parse(r.value) : []; }
-  catch { return []; }
-}
-async function saveFeed(posts) {
-  try { await storage.set(FEED_KEY, JSON.stringify(posts.slice(0, MAX_POSTS)), true); return true; }
-  catch { return false; }
-}
-
-function compressImage(file) {
+/* ---------- Image compression (returns a JPEG Blob for Storage upload) ---------- */
+function compressImage(file): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -120,7 +109,7 @@ function compressImage(file) {
         cv.width = Math.round(img.width * scale);
         cv.height = Math.round(img.height * scale);
         cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
-        resolve(cv.toDataURL("image/jpeg", 0.62));
+        cv.toBlob((b) => (b ? resolve(b) : reject(new Error("Encoding failed"))), "image/jpeg", 0.62);
       };
       img.onerror = reject;
       img.src = e.target.result as string;
@@ -188,66 +177,30 @@ const inputStyle = {
 /* ============================ APP ============================ */
 export default function App() {
   const [tab, setTab] = useState("feed");
-  const [me, setMe] = useState("");
-  const [authError, setAuthError] = useState("");
-  const [posts, setPosts] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [userId, setUserId] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [protoFilter, setProtoFilter] = useState(null);
-  const [storageDown, setStorageDown] = useState(false);
   const [showGame, setShowGame] = useState(false);
 
   useEffect(() => {
+    let unsub = () => {};
     (async () => {
-      // Restore the signed-in byline. Migrate anyone who used the old per-device
-      // byline (ME_KEY) into a real account so they don't get logged out by the update.
-      let who = await getSession();
-      if (!who) {
-        try {
-          const legacy = await storage.get(ME_KEY, false);
-          if (legacy?.value) {
-            const res = await accountLogin(legacy.value);
-            if (res.ok && res.username) who = res.username;
-          }
-        } catch {}
-      }
-      if (who) setMe(who);
-      setPosts(await loadFeed());
-      setLoading(false);
+      const uid = await getUserId();
+      setUserId(uid);
+      if (uid) setProfile(await getMyProfile());
+      setAuthLoading(false);
+      // React to magic-link completion, sign-in, and sign-out.
+      unsub = onAuthChange(async (newUid) => {
+        setUserId(newUid);
+        setProfile(newUid ? await getMyProfile() : null);
+      });
     })();
+    return () => unsub();
   }, []);
 
-  const login = async (username) => {
-    const res = await accountLogin(username);
-    if (res.ok && res.username) {
-      setMe(res.username);
-      setAuthError("");
-    } else {
-      setAuthError(res.error || "Could not sign in.");
-    }
-    return res;
-  };
-
-  const logout = async () => {
-    await accountLogout();
-    setMe("");
-    setAuthError("");
-  };
-
-  const refresh = async () => setPosts(await loadFeed());
-  const addPost = async (post) => {
-    const latest = await loadFeed();
-    const next = [post, ...latest].slice(0, MAX_POSTS);
-    setPosts(next);
-    const ok = await saveFeed(next);
-    if (!ok) setStorageDown(true);
-  };
-  const mutatePost = async (id, fn) => {
-    const latest = await loadFeed();
-    const next = latest.map((p) => (p.id === id ? fn({ ...p }) : p));
-    setPosts(next);
-    const ok = await saveFeed(next);
-    if (!ok) setStorageDown(true);
-  };
+  const me = profile?.byline || "";
+  const doSignOut = async () => { await signOut(); setUserId(null); setProfile(null); };
   const jumpToProtocol = (pid) => { setProtoFilter(pid); setTab("protocols"); window.scrollTo(0, 0); };
 
   return (
@@ -275,16 +228,16 @@ export default function App() {
         {me && (
           <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, padding: "6px 0 0", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: "0.06em", color: SEPIA }}>
             <span>FILED UNDER THE BYLINE: <span style={{ fontWeight: 700, color: INK }}>{me.toUpperCase()}</span></span>
-            <button onClick={logout} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: "0.06em", color: RED, textDecoration: "underline", textUnderlineOffset: 3, padding: 0 }}>
+            <button onClick={doSignOut} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: "0.06em", color: RED, textDecoration: "underline", textUnderlineOffset: 3, padding: 0 }}>
               SIGN OUT
             </button>
           </div>
         )}
 
-        {storageDown && (
+        {!isSupabaseConfigured && (
           <div style={{ border: `2px solid ${RED}`, margin: "10px 0 0", padding: "10px 14px", textAlign: "center" }}>
             <p style={{ margin: 0, fontFamily: "'Courier Prime', monospace", fontSize: 11.5, lineHeight: 1.6, color: RED, letterSpacing: "0.04em" }}>
-              CORRECTION: SUBMISSIONS ARE NOT SAVING. If you are viewing this inside Claude, it must be published first. Open the published link to file reports that stick.
+              CORRECTION: THE PRESSES ARE OFFLINE. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY, then reload to sign in and file reports.
             </p>
           </div>
         )}
@@ -305,9 +258,15 @@ export default function App() {
 
         <main style={{ paddingBottom: 40 }}>
           {tab === "feed" && (
-            <Feed me={me} login={login} authError={authError}
-              posts={posts} loading={loading} addPost={addPost} mutatePost={mutatePost} refresh={refresh} jump={jumpToProtocol}
-              onGoldenSnake={() => setShowGame(true)} />
+            authLoading ? (
+              <p style={{ textAlign: "center", fontStyle: "italic", padding: "30px 0" }}>Checking your press credentials...</p>
+            ) : !userId ? (
+              <SignIn />
+            ) : !profile ? (
+              <BylineSetup onDone={setProfile} />
+            ) : (
+              <Feed me={me} userId={userId} jump={jumpToProtocol} onGoldenSnake={() => setShowGame(true)} />
+            )
           )}
           {tab === "guide" && <Guide jump={jumpToProtocol} />}
           {tab === "protocols" && <Protocols filter={protoFilter} clearFilter={() => setProtoFilter(null)} />}
@@ -327,113 +286,166 @@ export default function App() {
   );
 }
 
+/* ============================ SIGN IN ============================ */
+// These auth screens render as <section> (not <div>) so React doesn't try to
+// reuse their <input> nodes as the composer's inputs when you cross the sign-in
+// boundary (which would trip a controlled→uncontrolled warning).
+const authCard = { border: rule(1), outline: `1px solid ${INK}`, outlineOffset: 3, padding: "28px 24px", margin: "34px auto", maxWidth: 480, textAlign: "center" } as const;
+const kicker = { fontFamily: "'Oswald', sans-serif", fontSize: 12, letterSpacing: "0.3em", textTransform: "uppercase", margin: "0 0 8px", color: RED } as const;
+const errLine = { fontFamily: "'Courier Prime', monospace", fontSize: 11.5, color: RED, margin: "0 0 12px" } as const;
+
+function SignIn() {
+  const [email, setEmail] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    if (sending || !email.trim()) return;
+    setSending(true); setErr("");
+    try { await sendMagicLink(email); setSent(true); }
+    catch (e) { setErr(e?.message || "Could not send the link. Try again."); }
+    finally { setSending(false); }
+  };
+
+  if (sent) {
+    return (
+      <section style={authCard}>
+        <p style={kicker}>Press Credentials</p>
+        <h2 style={{ fontFamily: "'Old Standard TT', serif", fontSize: 26, margin: "0 0 8px" }}>Check Your Inbox</h2>
+        <p style={{ fontSize: 14.5, lineHeight: 1.6, margin: "0 0 18px", fontStyle: "italic" }}>
+          We wired a one-time link to <span style={{ fontWeight: 700 }}>{email}</span>. Open it on this device to take up your desk. You may close this page.
+        </p>
+        <Btn onClick={() => { setSent(false); setErr(""); }}>Use a different email</Btn>
+      </section>
+    );
+  }
+  return (
+    <section style={authCard}>
+      <p style={kicker}>Press Credentials</p>
+      <h2 style={{ fontFamily: "'Old Standard TT', serif", fontSize: 26, margin: "0 0 8px" }}>Sign In to File Reports</h2>
+      <p style={{ fontSize: 14.5, lineHeight: 1.6, margin: "0 0 18px", fontStyle: "italic" }}>
+        No password. Enter your email and we'll send a one-time magic link. Sign in on any device to reclaim your desk and your dispatches.
+      </p>
+      <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
+        placeholder="you@example.com" aria-label="Email" style={{ ...inputStyle, textAlign: "center", marginBottom: 12 }} />
+      {err && <p style={errLine}>{err}</p>}
+      <Btn primary onClick={submit} disabled={sending || !email.trim()}>
+        {sending ? "Sending the link..." : "Email Me a Magic Link"}
+      </Btn>
+    </section>
+  );
+}
+
+/* ========================= BYLINE SETUP ========================= */
+function BylineSetup({ onDone }) {
+  const [byline, setByline] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    if (saving || !byline.trim()) return;
+    setSaving(true); setErr("");
+    try { onDone(await setMyByline(byline)); }
+    catch (e) { setErr(e?.message || "Could not save your byline. Try again."); setSaving(false); }
+  };
+  return (
+    <section style={authCard}>
+      <p style={kicker}>Press Credentials</p>
+      <h2 style={{ fontFamily: "'Old Standard TT', serif", fontSize: 26, margin: "0 0 8px" }}>Choose Your Byline</h2>
+      <p style={{ fontSize: 14.5, lineHeight: 1.6, margin: "0 0 18px", fontStyle: "italic" }}>
+        Every report needs a name. This is how you'll run on the front page. You can retire it later.
+      </p>
+      <input value={byline} onChange={(e) => setByline(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
+        placeholder="The LogFather, Scoop Dogg, Editor-in-Relief..." aria-label="Byline" maxLength={24}
+        style={{ ...inputStyle, textAlign: "center", marginBottom: 12 }} />
+      {err && <p style={errLine}>{err}</p>}
+      <Btn primary onClick={submit} disabled={saving || !byline.trim()}>
+        {saving ? "Claiming..." : "Claim This Byline"}
+      </Btn>
+    </section>
+  );
+}
+
 /* ============================ FEED ============================ */
-function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refresh, jump, onGoldenSnake }) {
-  const [imgData, setImgData] = useState(null);
+function Feed({ me, userId, jump, onGoldenSnake }) {
+  const [posts, setPosts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [imageBlob, setImageBlob] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
   const [type, setType] = useState(4);
   const [note, setNote] = useState("");
   const [posting, setPosting] = useState(false);
   const [commentDrafts, setCommentDrafts] = useState({});
-  const [loginInput, setLoginInput] = useState("");
-  const [signingIn, setSigningIn] = useState(false);
   const [mediaMode, setMediaMode] = useState("photo"); // "photo" | "plate"
-  const [visibility, setVisibility] = useState("public"); // "public" | "private"
+  const [visibility, setVisibility] = useState<"public" | "private">("public");
   const fileRef = useRef(null);
 
-  const doLogin = async () => {
-    if (signingIn) return;
-    setSigningIn(true);
-    await login(loginInput);
-    setSigningIn(false);
+  const load = async () => {
+    try { setPosts(await fetchFeed()); setError(""); }
+    catch { setError("Could not reach the presses. Check the wire and try again."); }
+    finally { setLoading(false); }
   };
-
-  if (!me) {
-    // Rendered as <section> (not <div>) on purpose: it keeps React from reusing
-    // the byline <input> node as the composer's file <input> when you sign in,
-    // which otherwise trips a controlled→uncontrolled warning.
-    return (
-      <section style={{ border: rule(1), outline: `1px solid ${INK}`, outlineOffset: 3, padding: "28px 24px", margin: "34px auto", maxWidth: 480, textAlign: "center" }}>
-        <p style={{ fontFamily: "'Oswald', sans-serif", fontSize: 12, letterSpacing: "0.3em", textTransform: "uppercase", margin: "0 0 8px", color: RED }}>Press Credentials</p>
-        <h2 style={{ fontFamily: "'Old Standard TT', serif", fontSize: 26, margin: "0 0 8px" }}>Sign In to File Reports</h2>
-        <p style={{ fontSize: 14.5, lineHeight: 1.6, margin: "0 0 18px", fontStyle: "italic" }}>
-          One byline is all it takes. Type yours to claim it — no password required. Sign in again with the same byline on any device to reclaim your desk and your filed dispatches.
-        </p>
-        <input value={loginInput} onChange={(e) => setLoginInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doLogin()}
-          placeholder="The LogFather, Scoop Dogg, Editor-in-Relief..." aria-label="Byline" style={{ ...inputStyle, textAlign: "center", marginBottom: 10 }} />
-        <input type="password" disabled value="" placeholder={PASSWORD_REQUIRED ? "Password" : "Password — disabled for now"}
-          aria-label="Password (disabled)" style={{ ...inputStyle, textAlign: "center", marginBottom: 6, opacity: 0.5, cursor: "not-allowed" }} />
-        <p style={{ fontFamily: "'Courier Prime', monospace", fontSize: 10, letterSpacing: "0.04em", color: SEPIA, margin: "0 0 16px" }}>
-          Passwords are switched off for now. Trusted friends only.
-        </p>
-        {authError && (
-          <p style={{ fontFamily: "'Courier Prime', monospace", fontSize: 11.5, color: RED, margin: "0 0 12px" }}>{authError}</p>
-        )}
-        <Btn primary onClick={doLogin} disabled={signingIn || !loginInput.trim()}>
-          {signingIn ? "Checking the roster..." : "Sign In / Join the Press Corps"}
-        </Btn>
-      </section>
-    );
-  }
+  useEffect(() => { load(); }, []);
 
   const handleFile = async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    try { setImgData(await compressImage(f)); } catch { alert("That photograph could not be developed. Try another."); }
+    try {
+      const blob = await compressImage(f);
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      setImageBlob(blob); setPreviewUrl(URL.createObjectURL(blob));
+    } catch { alert("That photograph could not be developed. Try another."); }
+  };
+  const clearImage = () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setImageBlob(null); setPreviewUrl(null);
+    if (fileRef.current) fileRef.current.value = "";
   };
 
   const usePlaceholder = mediaMode === "plate";
 
   const submit = async () => {
-    if (!usePlaceholder && !imgData) return; // a photograph is required unless using the plate
+    if (!usePlaceholder && !imageBlob) return; // a photograph is required unless using the plate
     setPosting(true);
     const postedType = type;
-    await addPost({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      author: me, ts: Date.now(),
-      img: usePlaceholder ? null : imgData,
-      usePlaceholder,
-      type, note: note.trim().slice(0, 240),
-      visibility,
-      reactions: {}, comments: [],
-    });
-    setImgData(null); setNote(""); setType(4); setPosting(false);
-    setMediaMode("photo"); setVisibility("public");
-    if (fileRef.current) fileRef.current.value = "";
-    if (postedType === 4) onGoldenSnake();
+    try {
+      await createPost({ userId, type, note: note.trim(), visibility, usePlaceholder, imageBlob });
+      clearImage(); setNote(""); setType(4); setMediaMode("photo"); setVisibility("public");
+      await load();
+      if (postedType === 4) onGoldenSnake();
+    } catch {
+      setError("That dispatch would not file. Try again.");
+    } finally {
+      setPosting(false);
+    }
   };
 
-  const toggleVisibility = (post) => mutatePost(post.id, (p) => {
-    p.visibility = (p.visibility || "public") === "public" ? "private" : "public";
-    return p;
-  });
+  const toggleVisibility = async (p) => {
+    const next = p.visibility === "private" ? "public" : "private";
+    try { await setPostVisibility(p.id, next); await load(); } catch { setError("Could not change circulation."); }
+  };
 
-  const isMine = (p) => (p.author || "").toLowerCase() === (me || "").toLowerCase();
-  // Private posts are shown only to their author. (This is UI-level privacy — see lib/accounts.ts.)
-  const visiblePosts = posts.filter((p) => (p.visibility || "public") === "public" || isMine(p));
+  const react = async (p, emoji) => {
+    const mine = (p.reactions || []).some((r) => r.emoji === emoji && r.user_id === userId);
+    try { await toggleReaction(p.id, userId, emoji, !mine); await load(); } catch {}
+  };
 
-  const react = (post, emoji) => mutatePost(post.id, (p) => {
-    const r = { ...(p.reactions || {}) };
-    const key = `${emoji}:${me}`;
-    r[key] ? delete r[key] : (r[key] = 1);
-    p.reactions = r;
-    return p;
-  });
-
-  const comment = (post) => {
-    const text = (commentDrafts[post.id] || "").trim();
+  const comment = async (p) => {
+    const text = (commentDrafts[p.id] || "").trim();
     if (!text) return;
-    mutatePost(post.id, (p) => {
-      p.comments = [...(p.comments || []), { author: me, text: text.slice(0, 300), ts: Date.now() }];
-      return p;
-    });
-    setCommentDrafts((d) => ({ ...d, [post.id]: "" }));
+    setCommentDrafts((d) => ({ ...d, [p.id]: "" }));
+    try { await addComment(p.id, userId, text); await load(); } catch { setError("Your letter would not print."); }
   };
 
   const reactionCounts = (p) => {
     const counts = {};
-    Object.keys(p.reactions || {}).forEach((k) => { const e = k.split(":")[0]; counts[e] = (counts[e] || 0) + 1; });
+    (p.reactions || []).forEach((r) => { counts[r.emoji] = (counts[r.emoji] || 0) + 1; });
     return counts;
   };
+  const iReacted = (p, emoji) => (p.reactions || []).some((r) => r.emoji === emoji && r.user_id === userId);
+  const isMine = (p) => p.author_id === userId;
 
   return (
     <>
@@ -455,7 +467,7 @@ function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refre
         </div>
 
         {mediaMode === "photo" ? (
-          !imgData ? (
+          !previewUrl ? (
             <button onClick={() => fileRef.current?.click()} style={{
               width: "100%", padding: "30px 14px", background: "rgba(255,255,255,0.35)",
               border: `1px dashed ${INK}`, cursor: "pointer", fontFamily: "'Old Standard TT', serif",
@@ -465,8 +477,8 @@ function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refre
             </button>
           ) : (
             <div style={{ position: "relative", marginBottom: 4 }}>
-              <img src={imgData} alt="Evidence, awaiting publication" style={{ width: "100%", display: "block", border: rule(1), filter: "sepia(0.15) contrast(1.02)" }} />
-              <button onClick={() => { setImgData(null); if (fileRef.current) fileRef.current.value = ""; }}
+              <img src={previewUrl} alt="Evidence, awaiting publication" style={{ width: "100%", display: "block", border: rule(1), filter: "sepia(0.15) contrast(1.02)" }} />
+              <button onClick={clearImage}
                 style={{ position: "absolute", top: 8, right: 8, background: PAPER, border: rule(1), padding: "3px 9px", cursor: "pointer", fontFamily: "'Courier Prime', monospace", fontSize: 12 }}>KILL</button>
             </div>
           )
@@ -497,7 +509,7 @@ function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refre
           <label style={{ fontFamily: "'Oswald', sans-serif", fontSize: 11, letterSpacing: "0.2em", textTransform: "uppercase" }}>Circulation</label>
           <div style={{ display: "flex", border: rule(1), flex: 1, minWidth: 200 }}>
             {[["public", "Public"], ["private", "Private"]].map(([v, label], i) => (
-              <button key={v} onClick={() => setVisibility(v)} style={{
+              <button key={v} onClick={() => setVisibility(v as "public" | "private")} style={{
                 flex: 1, padding: "8px 10px", cursor: "pointer", background: visibility === v ? INK : "transparent",
                 color: visibility === v ? PAPER : INK, border: "none", borderLeft: i > 0 ? rule(1) : "none",
                 fontFamily: "'Oswald', sans-serif", fontWeight: 500, fontSize: 11, letterSpacing: "0.14em", textTransform: "uppercase",
@@ -510,33 +522,38 @@ function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refre
         </p>
 
         <div style={{ textAlign: "center" }}>
-          <Btn primary onClick={submit} disabled={(mediaMode === "photo" && !imgData) || posting} style={{ minWidth: 220 }}>
+          <Btn primary onClick={submit} disabled={(mediaMode === "photo" && !imageBlob) || posting} style={{ minWidth: 220 }}>
             {posting ? "Going to press..." : "Run It on the Front Page"}
           </Btn>
         </div>
       </div>
 
+      {error && (
+        <p style={{ textAlign: "center", fontFamily: "'Courier Prime', monospace", fontSize: 11.5, color: RED, margin: "12px 0 0" }}>{error}</p>
+      )}
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", margin: "28px 0 0" }}>
         <SectionHead>Latest Dispatches</SectionHead>
       </div>
       <div style={{ textAlign: "center", marginTop: -8, marginBottom: 18 }}>
-        <button onClick={refresh} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: "0.1em", color: SEPIA }}>
+        <button onClick={load} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: "0.1em", color: SEPIA }}>
           ↻ CHECK THE WIRE
         </button>
       </div>
 
       {loading && <p style={{ textAlign: "center", fontStyle: "italic" }}>The presses are warming up...</p>}
-      {!loading && visiblePosts.length === 0 && (
+      {!loading && posts.length === 0 && (
         <div style={{ textAlign: "center", padding: "30px 0 10px" }}>
           <p style={{ fontFamily: "'Old Standard TT', serif", fontSize: 22, margin: 0 }}>Nothing to Report.</p>
           <p style={{ fontStyle: "italic", fontSize: 14, color: SEPIA, margin: "6px 0 0" }}>A slow news day at the bowl. Someone must go first.</p>
         </div>
       )}
 
-      {visiblePosts.map((p, idx) => {
+      {posts.map((p, idx) => {
         const meta = TYPE_META[p.type] || TYPE_META[4];
         const counts = reactionCounts(p);
-        const priv = (p.visibility || "public") === "private";
+        const priv = p.visibility === "private";
+        const author = p.author?.byline || "Anonymous";
         return (
           <article key={p.id} style={{ borderTop: idx === 0 ? "none" : rule(1), padding: "24px 0 26px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
@@ -545,7 +562,7 @@ function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refre
                   Type {p.type} Reported: {meta.label}
                 </h3>
                 <p style={{ margin: 0, fontFamily: "'Courier Prime', monospace", fontSize: 11.5, letterSpacing: "0.06em" }}>
-                  By <span style={{ fontWeight: 700 }}>{(p.author || "Anonymous").toUpperCase()}</span>, Staff Correspondent · {timeAgo(p.ts)}
+                  By <span style={{ fontWeight: 700 }}>{author.toUpperCase()}</span>, Staff Correspondent · {timeAgo(new Date(p.created_at).getTime())}
                 </p>
                 {priv && (
                   <p style={{ margin: "4px 0 0", fontFamily: "'Oswald', sans-serif", fontSize: 10, letterSpacing: "0.24em", textTransform: "uppercase", color: RED }}>
@@ -558,9 +575,9 @@ function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refre
               </Stamp>
             </div>
 
-            {p.img ? (
+            {p.imageUrl ? (
               <figure style={{ margin: "14px 0 4px" }}>
-                <img src={p.img} alt={`Type ${p.type} evidence filed by ${p.author}`}
+                <img src={p.imageUrl} alt={`Type ${p.type} evidence filed by ${author}`}
                   style={{ width: "100%", display: "block", border: rule(1), filter: "sepia(0.18) contrast(1.03)" }} />
                 <figcaption style={{ fontFamily: "'Courier Prime', monospace", fontSize: 10.5, color: SEPIA, marginTop: 5, letterSpacing: "0.04em" }}>
                   PHOTOGRAPHIC EVIDENCE · SUBMITTED BY THE CORRESPONDENT · UNRETOUCHED
@@ -605,7 +622,7 @@ function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refre
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {REACTIONS.map((e) => (
                 <button key={e} onClick={() => react(p, e)} style={{
-                  border: rule(1), background: counts[e] ? PAPER_DK : "transparent", cursor: "pointer",
+                  border: rule(1), background: iReacted(p, e) ? PAPER_DK : "transparent", cursor: "pointer",
                   padding: "5px 12px", fontSize: 14, fontFamily: "'Courier Prime', monospace",
                 }}>
                   {e}{counts[e] ? ` ${counts[e]}` : ""}
@@ -616,9 +633,9 @@ function Feed({ me, login, authError, posts, loading, addPost, mutatePost, refre
             {(p.comments || []).length > 0 && (
               <div style={{ margin: "16px 0 0", paddingLeft: 16, borderLeft: `3px solid ${FAINT}` }}>
                 <p style={{ fontFamily: "'Oswald', sans-serif", fontSize: 10, letterSpacing: "0.28em", textTransform: "uppercase", color: SEPIA, margin: "0 0 8px" }}>Letters to the Editor</p>
-                {p.comments.map((c, i) => (
-                  <p key={i} style={{ margin: "0 0 7px", fontSize: 14, lineHeight: 1.5 }}>
-                    <span style={{ fontWeight: 700 }}>{c.author}:</span> <span style={{ fontStyle: "italic" }}>"{c.text}"</span>
+                {p.comments.map((c) => (
+                  <p key={c.id} style={{ margin: "0 0 7px", fontSize: 14, lineHeight: 1.5 }}>
+                    <span style={{ fontWeight: 700 }}>{c.author?.byline || "Anonymous"}:</span> <span style={{ fontStyle: "italic" }}>"{c.text}"</span>
                   </p>
                 ))}
               </div>
@@ -655,9 +672,11 @@ function PoopSnake({ onClose }) {
   });
 
   useEffect(() => {
-    (async () => {
-      try { const r = await storage.get("sp-snake-best", false); if (r) setBest(Number(r.value) || 0); } catch {}
-    })();
+    // High score is a per-device value — localStorage, no backend needed.
+    try {
+      const v = typeof window !== "undefined" ? window.localStorage.getItem("sp-snake-best") : null;
+      if (v) setBest(Number(v) || 0);
+    } catch {}
   }, []);
 
   const placeFood = (snake) => {
@@ -732,7 +751,7 @@ function PoopSnake({ onClose }) {
         setScore((sc) => {
           setBest((b) => {
             const nb = Math.max(b, sc);
-            if (nb > b) { try { storage.set("sp-snake-best", String(nb), false); } catch {} }
+            if (nb > b) { try { window.localStorage.setItem("sp-snake-best", String(nb)); } catch {} }
             return nb;
           });
           return sc;
