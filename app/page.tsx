@@ -403,7 +403,14 @@ function Feed({ me, userId, jump, onGoldenSnake }) {
     catch { setError("Could not reach the presses. Check the wire and try again."); }
     finally { setLoading(false); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    // Renew five-minute photo links while reading and refresh on returning.
+    const refresh = () => { if (!document.hidden) load(); };
+    const timer = window.setInterval(refresh, 240_000);
+    window.addEventListener("focus", refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, []);
 
   const handleFile = async (e) => {
     const f = e.target.files?.[0];
@@ -428,7 +435,7 @@ function Feed({ me, userId, jump, onGoldenSnake }) {
     const postedType = type;
     try {
       await createPost({ userId, type, note: note.trim(), visibility, usePlaceholder, imageBlob });
-      clearImage(); setNote(""); setType(4); setMediaMode("photo"); setVisibility("public");
+      clearImage(); setNote(""); setType(4); setMediaMode("photo"); setVisibility("private");
       await load();
       if (postedType === 4) onGoldenSnake();
     } catch {
