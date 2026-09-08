@@ -1,102 +1,72 @@
-# The Daily Dump
+# The Daily Dump (Daily Digest)
 
-A private broadsheet-themed gut-health app for you and your friends. Share photos, tag Bristol types, react and comment, browse the field guide and protocols, and unlock the Golden Snake game on a Type 4.
+A broadsheet-themed gut-health app for friends: private or shared dispatches, photos or illustrated plates, Bristol types, reactions, letters to the editor, a field guide, and the Golden Snake game.
 
-This is the Next.js version, built to run on your own domain via Vercel so you control the link preview, favicon, and access.
+**Live:** https://dailydigest-pi.vercel.app/
 
-## What it does
+## Shared backend
 
-- Runs as a real Next.js app instead of a Claude artifact.
-- **Passwordless sign-in** via Supabase Auth (email magic link). No passwords to remember; sign in on any device and your dispatches follow you.
-- **Real accounts.** Your byline (display name) lives in a `profiles` row. Posts, reactions, and comments are relational tables — no single shared blob.
-- **Public / private posts.** Each post is public (every signed-in reader sees it) or private (only you). Toggle any of your posts at any time.
-- **Enforced privacy.** Visibility is enforced in the database by Row Level Security — a private post and its reactions, comments, and photo are unreadable by anyone but the author, not just hidden in the UI.
-- **Illustrated plate option.** Post the house cartoon for a Bristol type instead of uploading a photo. Photos go into a private Supabase Storage bucket and are served through short-lived signed URLs.
-- Your snake high score lives in the browser's localStorage, so it stays per-device.
-- The text-message link preview is controlled by the metadata in `app/layout.tsx`, currently set to show only "The Daily Dump".
+Daily Digest uses the active Vibe Check Supabase project `xyhbuqsxglfjbounogdz`, alongside Campground, Dialogue, and AI Catch Up. Each app keeps its own data and access rules.
 
-## Setup
+- `digest_profiles`: bylines only, separate from Vibe Check's private `profiles`.
+- `digest_posts`, `digest_reactions`, `digest_comments`: relational dispatches and conversation.
+- `digest-evidence`: private photo bucket, JPEG only, maximum 5 MiB.
+- Shared Supabase Auth: existing Vibe Check / Campground users can sign in with the same email and password. Signing out here only ends this app's session.
 
-### 1. Install
+Readers choose a byline before entering the publication. New dispatches start **private**. A public dispatch is visible to any signed-in account that has joined Daily Digest; there is no invitation gate. Private dispatches, comments, reactions and photos remain visible only to their author. Photos cannot be exposed by attaching another author's path to a public post.
 
-```bash
-npm install
-```
+Photo URLs last five minutes. Visibility changes prevent new URLs from being issued to other readers; a previously issued URL can remain usable until it expires. The snake high score stays in browser storage, per device.
 
-### 2. Create the schema
+## Local development
 
-In your Supabase project, open the SQL editor and run the contents of `supabase.sql`. It is idempotent and creates the `profiles`, `posts`, `reactions`, and `comments` tables, all Row Level Security policies, and the private `evidence` storage bucket with its policies.
-
-### 3. Turn on magic-link auth
-
-In the Supabase dashboard:
-
-- **Authentication → Providers → Email**: enable it, and enable "magic link" (email OTP). You can leave "Confirm email" on.
-- **Authentication → URL Configuration**: set the **Site URL** to where the app runs (e.g. `http://localhost:3000` for local dev, or your Vercel domain), and add both to **Redirect URLs**. The magic link returns users to `window.location.origin`, so this must match.
-
-### 4. Add your keys
-
-Copy the example env file and fill it in with values from Supabase (Project Settings > API):
-
-```bash
+```sh
+npm ci
 cp .env.local.example .env.local
-```
-
-```
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-public-key
-```
-
-### 5. Run locally
-
-```bash
+# Add the shared project's publishable key to NEXT_PUBLIC_SUPABASE_ANON_KEY.
 npm run dev
 ```
 
-Open http://localhost:3000
+Open http://localhost:3000. Only public browser credentials belong in these variables. Never use a service-role key in the app.
 
-## Deploy to Vercel
+## Database migrations
 
-1. Push this folder to a GitHub repo.
-2. In Vercel, import the repo.
-3. Add the two environment variables (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`) in the Vercel project settings.
-4. Deploy. Add your custom domain if you want (thedailydump... etc).
-5. Back in Supabase, add your Vercel/custom domain to **Authentication → URL Configuration** (Site URL + Redirect URLs) so magic links work in production.
+The hosted migration is already applied. For a new shared environment:
 
-The link preview will read "The Daily Dump" and nothing else. To change it, edit `app/layout.tsx`.
+1. Apply `supabase/migrations/20260908150701_daily_digest_shared_backend.sql`.
+2. Apply Vibe Check's `20260908151011_preserve_daily_digest_identity.sql` after its existing shared-account protection migration. This extends Vibe Check deletion protection to Daily Digest bylines and uploads.
+3. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` in the deployment.
+4. Add the deployment's origin to Supabase Auth redirect URLs. Preserve Vibe Check's existing Site URL and other app callbacks.
 
-## Privacy model
+Do **not** apply `supabase/legacy/standalone.sql` to the shared project: its generic `profiles` table conflicts with Vibe Check. The file is retained only as a reference for historical imports.
 
-Privacy is enforced by the database, not just the interface. Every read and write goes through Row Level Security keyed on the signed-in user (`auth.uid()`):
+## Deployment
 
-- A **private** post — and its reactions, comments, and photo — is readable only by its author.
-- A **public** post is readable by any signed-in reader.
-- You can only post, react, comment, or upload as yourself, and only change your own posts.
+The Vercel project is `dailydigest`, connected to this GitHub repository. Its production, preview, and development environments have the shared public Supabase connection. `work/`, `.env*`, SQL and local test artifacts are excluded from uploads.
 
-The photo bucket is private; images are fetched through short-lived signed URLs that are themselves RLS-gated, so a signed URL can only be minted for a photo you're allowed to see.
-
-### Verifying the privacy rules
-
-The RLS policies are checked against real Postgres (via PGlite) with two simulated users:
-
-```bash
-npm run test:rls
+```sh
+vercel link --project dailydigest
+vercel deploy --prod --skip-domain
+# Verify the candidate, then:
+vercel promote <candidate-url>
 ```
 
-It proves that private posts, reactions, comments, and photos stay invisible to non-authors and that authorship/folder ownership can't be spoofed. See `supabase/rls.test.mjs`.
+Preview builds currently use the shared live backend. Use disposable test accounts and remove their data after verification.
 
-## Files worth knowing
+## Verification
 
-- `app/page.tsx` — the whole UI (sign-in, byline setup, feed, composer, field guide, classifieds, snake game).
-- `app/layout.tsx` — metadata and link-preview title.
-- `lib/auth.ts` — magic-link sign-in, session, and profile (byline).
-- `lib/db.ts` — the feed data layer (posts, reactions, comments, photo upload + signed URLs).
-- `lib/supabaseClient.ts` — Supabase connection (resilient to missing env vars).
-- `supabase.sql` — database schema, RLS policies, and storage setup.
-- `supabase/rls.test.mjs` — reproducible RLS privacy test.
+```sh
+npm run check
+npm audit
+```
 
-## Next ideas
+The RLS suite runs the actual migration in PGlite (Postgres), with different identities. It covers private/public posts, comments and reactions, photo access and path spoofing, anonymous access, publication membership, and preservation of an existing Vibe Check profile. Type checking and a production Next.js build complete the check.
 
-- Realtime feed updates via Supabase channels instead of the "Check the wire" button.
-- Rate limiting / abuse controls if the group grows beyond friends.
-- An invite-code or allow-list gate on sign-up so not just anyone with the link can join.
+Hosted verification additionally exercises real Auth, PostgREST relationship joins, profile upserts, Storage uploads and signing, and the deployed Vibe Check deletion endpoint. Browser verification covers shared-password sign-in, byline setup and publishing. Tests use synthetic records and never send real sign-in emails.
+
+## Outstanding recovery and email setup
+
+The old Daily Digest project `mblmmfguqwwwszfvawtw` remains paused and untouched. Its database, users, and photos have **not** been imported. The Management API lists no available backup records; historical recovery requires an accessible database export and Storage export. Preserve old user IDs or build an explicit identity mapping before importing foreign keys and photo folders.
+
+The shared project has no custom SMTP sender yet. Password access for existing confirmed shared accounts works. Magic-link/new-account delivery remains dependent on finishing the shared email configuration; the interface explains this limitation.
+
+The health reference content and newspaper styling are retained from the original app. This consolidation does not medically validate that content.

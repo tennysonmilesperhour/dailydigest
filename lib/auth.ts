@@ -16,11 +16,14 @@ export async function getUserId(): Promise<string | null> {
 
 /** Subscribe to sign-in/sign-out. Returns an unsubscribe function. */
 export function onAuthChange(cb: (userId: string | null) => void): () => void {
+  let active = true;
   try {
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      cb(session?.user?.id ?? null);
+      // Supabase holds the session lock inside this callback. Defer any profile
+      // queries until it returns, otherwise signing in can deadlock.
+      setTimeout(() => { if (active) cb(session?.user?.id ?? null); }, 0);
     });
-    return () => data.subscription.unsubscribe();
+    return () => { active = false; data.subscription.unsubscribe(); };
   } catch {
     return () => {};
   }
@@ -36,11 +39,13 @@ export async function sendMagicLink(email: string): Promise<void> {
 }
 
 export async function signOut(): Promise<void> {
-  try {
-    await supabase.auth.signOut();
-  } catch {
-    /* nothing signed in / offline */
-  }
+  const { error } = await supabase.auth.signOut({ scope: "local" });
+  if (error) throw error;
+}
+
+export async function signInWithPassword(email: string, password: string): Promise<void> {
+  const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+  if (error) throw error;
 }
 
 /** The signed-in user's profile (byline), or null if they haven't set one yet. */
@@ -49,7 +54,7 @@ export async function getMyProfile(): Promise<Profile | null> {
     const uid = await getUserId();
     if (!uid) return null;
     const { data } = await supabase
-      .from("profiles")
+      .from("digest_profiles")
       .select("id,byline")
       .eq("id", uid)
       .maybeSingle();
@@ -66,7 +71,7 @@ export async function setMyByline(byline: string): Promise<Profile> {
   const clean = (byline || "").trim().slice(0, 24);
   if (!clean) throw new Error("Enter a byline.");
   const { data, error } = await supabase
-    .from("profiles")
+    .from("digest_profiles")
     .upsert({ id: uid, byline: clean })
     .select("id,byline")
     .single();

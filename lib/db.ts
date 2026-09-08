@@ -7,7 +7,7 @@ import { supabase } from "./supabaseClient";
  * filter by visibility itself; it only renders what RLS returns.
  */
 
-const BUCKET = "evidence";
+const BUCKET = "digest-evidence";
 const FEED_LIMIT = 100;
 
 export type FeedPost = {
@@ -27,14 +27,14 @@ export type FeedPost = {
 
 const SELECT = `
   id, author_id, type, note, image_path, use_placeholder, visibility, created_at,
-  author:profiles(byline),
-  reactions(emoji,user_id),
-  comments(id,text,created_at,author:profiles(byline))
+  author:digest_profiles!digest_posts_author_id_fkey(byline),
+  reactions:digest_reactions(emoji,user_id),
+  comments:digest_comments(id,text,created_at,author:digest_profiles!digest_comments_author_id_fkey(byline))
 `;
 
 export async function fetchFeed(): Promise<FeedPost[]> {
   const { data, error } = await supabase
-    .from("posts")
+    .from("digest_posts")
     .select(SELECT)
     .order("created_at", { ascending: false })
     .limit(FEED_LIMIT);
@@ -45,7 +45,7 @@ export async function fetchFeed(): Promise<FeedPost[]> {
   const paths = posts.map((p) => p.image_path).filter(Boolean) as string[];
   const signed: Record<string, string> = {};
   if (paths.length) {
-    const { data: urls } = await supabase.storage.from(BUCKET).createSignedUrls(paths, 3600);
+    const { data: urls } = await supabase.storage.from(BUCKET).createSignedUrls(paths, 300);
     (urls || []).forEach((u: any) => {
       if (u?.path && u?.signedUrl) signed[u.path] = u.signedUrl;
     });
@@ -75,7 +75,7 @@ export async function createPost(opts: {
       .upload(image_path, opts.imageBlob, { contentType: "image/jpeg", upsert: false });
     if (upErr) throw upErr;
   }
-  const { error } = await supabase.from("posts").insert({
+  const { error } = await supabase.from("digest_posts").insert({
     author_id: opts.userId,
     type: opts.type,
     note: opts.note ? opts.note.slice(0, 240) : null,
@@ -83,21 +83,25 @@ export async function createPost(opts: {
     use_placeholder: opts.usePlaceholder,
     image_path,
   });
-  if (error) throw error;
+  if (error) {
+    // A failed post should not strand a private upload in the shared project.
+    if (image_path) await supabase.storage.from(BUCKET).remove([image_path]);
+    throw error;
+  }
 }
 
 export async function setPostVisibility(postId: string, visibility: "public" | "private"): Promise<void> {
-  const { error } = await supabase.from("posts").update({ visibility }).eq("id", postId);
+  const { error } = await supabase.from("digest_posts").update({ visibility }).eq("id", postId);
   if (error) throw error;
 }
 
 export async function toggleReaction(postId: string, userId: string, emoji: string, on: boolean): Promise<void> {
   if (on) {
-    const { error } = await supabase.from("reactions").insert({ post_id: postId, user_id: userId, emoji });
+    const { error } = await supabase.from("digest_reactions").insert({ post_id: postId, user_id: userId, emoji });
     if (error && error.code !== "23505") throw error; // 23505 = already reacted, ignore
   } else {
     const { error } = await supabase
-      .from("reactions")
+      .from("digest_reactions")
       .delete()
       .match({ post_id: postId, user_id: userId, emoji });
     if (error) throw error;
@@ -108,7 +112,7 @@ export async function addComment(postId: string, userId: string, text: string): 
   const clean = text.trim().slice(0, 300);
   if (!clean) return;
   const { error } = await supabase
-    .from("comments")
+    .from("digest_comments")
     .insert({ post_id: postId, author_id: userId, text: clean });
   if (error) throw error;
 }
