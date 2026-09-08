@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import {
-  getUserId, onAuthChange, sendMagicLink, signOut, getMyProfile, setMyByline, isSupabaseConfigured,
+  getUserId, onAuthChange, sendMagicLink, signInWithPassword, signOut, getMyProfile, setMyByline, isSupabaseConfigured,
 } from "../lib/auth";
 import { fetchFeed, createPost, setPostVisibility, toggleReaction, addComment } from "../lib/db";
 
@@ -184,23 +184,26 @@ export default function App() {
   const [showGame, setShowGame] = useState(false);
 
   useEffect(() => {
-    let unsub = () => {};
-    (async () => {
-      const uid = await getUserId();
+    let active = true;
+    let revision = 0;
+    const updateSession = async (uid) => {
+      const current = ++revision;
+      const nextProfile = uid ? await getMyProfile() : null;
+      if (!active || current !== revision) return;
       setUserId(uid);
-      if (uid) setProfile(await getMyProfile());
+      setProfile(nextProfile);
       setAuthLoading(false);
-      // React to magic-link completion, sign-in, and sign-out.
-      unsub = onAuthChange(async (newUid) => {
-        setUserId(newUid);
-        setProfile(newUid ? await getMyProfile() : null);
-      });
-    })();
-    return () => unsub();
+    };
+    const unsub = onAuthChange(updateSession);
+    getUserId().then((uid) => { if (active && revision === 0) updateSession(uid); });
+    return () => { active = false; unsub(); };
   }, []);
 
   const me = profile?.byline || "";
-  const doSignOut = async () => { await signOut(); setUserId(null); setProfile(null); };
+  const doSignOut = async () => {
+    try { await signOut(); setUserId(null); setProfile(null); }
+    catch { window.alert("Could not sign out. Please try again."); }
+  };
   const jumpToProtocol = (pid) => { setProtoFilter(pid); setTab("protocols"); window.scrollTo(0, 0); };
 
   return (
@@ -296,6 +299,8 @@ const errLine = { fontFamily: "'Courier Prime', monospace", fontSize: 11.5, colo
 
 function SignIn() {
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState("password");
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState("");
@@ -303,8 +308,11 @@ function SignIn() {
   const submit = async () => {
     if (sending || !email.trim()) return;
     setSending(true); setErr("");
-    try { await sendMagicLink(email); setSent(true); }
-    catch (e) { setErr(e?.message || "Could not send the link. Try again."); }
+    try {
+      if (mode === "password") await signInWithPassword(email, password);
+      else { await sendMagicLink(email); setSent(true); }
+    }
+    catch (e) { setErr(e?.message || "Could not sign in. Try again."); }
     finally { setSending(false); }
   };
 
@@ -325,14 +333,22 @@ function SignIn() {
       <p style={kicker}>Press Credentials</p>
       <h2 style={{ fontFamily: "'Old Standard TT', serif", fontSize: 26, margin: "0 0 8px" }}>Sign In to File Reports</h2>
       <p style={{ fontSize: 14.5, lineHeight: 1.6, margin: "0 0 18px", fontStyle: "italic" }}>
-        No password. Enter your email and we'll send a one-time magic link. Sign in on any device to reclaim your desk and your dispatches.
+        {mode === "password"
+          ? "Already use Vibe Check or Campground? Use the same email and password. Your byline and dispatches live here; your private journal stays private."
+          : "Enter your email for a one-time sign-in link. Email access is still being set up; existing readers can use their shared account password."}
       </p>
-      <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
+      <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
         placeholder="you@example.com" aria-label="Email" style={{ ...inputStyle, textAlign: "center", marginBottom: 12 }} />
-      {err && <p style={errLine}>{err}</p>}
-      <Btn primary onClick={submit} disabled={sending || !email.trim()}>
-        {sending ? "Sending the link..." : "Email Me a Magic Link"}
+      {mode === "password" && <input type="password" autoComplete="current-password" value={password}
+        onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
+        placeholder="Your password" aria-label="Password" style={{ ...inputStyle, textAlign: "center", marginBottom: 12 }} />}
+      {err && <p role="alert" style={errLine}>{err}</p>}
+      <Btn primary onClick={submit} disabled={sending || !email.trim() || (mode === "password" && !password)}>
+        {sending ? "Checking credentials..." : mode === "password" ? "Sign In" : "Email Me a Magic Link"}
       </Btn>
+      <p style={{ margin: "16px 0 0" }}><Btn small disabled={sending} onClick={() => {
+        setMode(mode === "password" ? "link" : "password"); setErr("");
+      }}>{mode === "password" ? "Use an email link" : "Use my account password"}</Btn></p>
     </section>
   );
 }
@@ -379,7 +395,7 @@ function Feed({ me, userId, jump, onGoldenSnake }) {
   const [posting, setPosting] = useState(false);
   const [commentDrafts, setCommentDrafts] = useState({});
   const [mediaMode, setMediaMode] = useState("photo"); // "photo" | "plate"
-  const [visibility, setVisibility] = useState<"public" | "private">("public");
+  const [visibility, setVisibility] = useState<"public" | "private">("private");
   const fileRef = useRef(null);
 
   const load = async () => {
@@ -387,7 +403,14 @@ function Feed({ me, userId, jump, onGoldenSnake }) {
     catch { setError("Could not reach the presses. Check the wire and try again."); }
     finally { setLoading(false); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    // Renew five-minute photo links while reading and refresh on returning.
+    const refresh = () => { if (!document.hidden) load(); };
+    const timer = window.setInterval(refresh, 240_000);
+    window.addEventListener("focus", refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, []);
 
   const handleFile = async (e) => {
     const f = e.target.files?.[0];
@@ -412,7 +435,7 @@ function Feed({ me, userId, jump, onGoldenSnake }) {
     const postedType = type;
     try {
       await createPost({ userId, type, note: note.trim(), visibility, usePlaceholder, imageBlob });
-      clearImage(); setNote(""); setType(4); setMediaMode("photo"); setVisibility("public");
+      clearImage(); setNote(""); setType(4); setMediaMode("photo"); setVisibility("private");
       await load();
       if (postedType === 4) onGoldenSnake();
     } catch {

@@ -1,0 +1,7 @@
+work/
+supabase/
+supabase.sql
+.env*
+.git/
+node_modules/
+.next/
