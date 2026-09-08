@@ -332,11 +332,6 @@ function SignIn() {
     <section style={authCard}>
       <p style={kicker}>Press Credentials</p>
       <h2 style={{ fontFamily: "'Old Standard TT', serif", fontSize: 26, margin: "0 0 8px" }}>Sign In to File Reports</h2>
-      <p style={{ fontSize: 14.5, lineHeight: 1.6, margin: "0 0 18px", fontStyle: "italic" }}>
-        {mode === "password"
-          ? "Already use Vibe Check or Campground? Use the same email and password. Your byline and dispatches live here; your private journal stays private."
-          : "Enter your email for a one-time sign-in link. Email access is still being set up; existing readers can use their shared account password."}
-      </p>
       <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
         placeholder="you@example.com" aria-label="Email" style={{ ...inputStyle, textAlign: "center", marginBottom: 12 }} />
       {mode === "password" && <input type="password" autoComplete="current-password" value={password}
