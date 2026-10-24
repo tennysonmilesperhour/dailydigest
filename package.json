@@ -29,5 +29,6 @@
   },
   "optionalDependencies": {
     "sharp": "^0.35.5"
-  }
+  },
+  "packageManager": "npm@12.2.1"
 }
