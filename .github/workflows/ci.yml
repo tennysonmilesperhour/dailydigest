@@ -1,0 +1,36 @@
+name: CI
+
+# Runs the full local gate (RLS suite in PGlite, typecheck, build) on every
+# pull request and push to main. The RLS suite guards the privacy rules and
+# needs no secrets or network database.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: npm run check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npx --yes npm@12.2.1 ci --ignore-scripts
+
+      - name: RLS suite, typecheck and build
+        run: npm run check
