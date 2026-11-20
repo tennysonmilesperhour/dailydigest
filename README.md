@@ -61,6 +61,8 @@ npm audit
 
 The RLS suite runs the actual migration in PGlite (Postgres), with different identities. It covers private/public posts, comments and reactions, photo access and path spoofing, anonymous access, publication membership, and preservation of an existing Vibe Check profile. Type checking and a production Next.js build complete the check.
 
+GitHub Actions runs `npm run check` on every pull request and push to `main` (`.github/workflows/ci.yml`).
+
 Hosted verification additionally exercises real Auth, PostgREST relationship joins, profile upserts, Storage uploads and signing, and the deployed Vibe Check deletion endpoint. Browser verification covers shared-password sign-in, byline setup and publishing. Tests use synthetic records and never send real sign-in emails.
 
 ## Outstanding recovery and email setup
